@@ -138,8 +138,11 @@ class PnLPredictor:
             combined_df['short_exposure'] = combined_df[market_cols].clip(upper=0).abs().sum(axis=1)
             
             # Portfolio concentration
-            combined_df['exposure_concentration'] = (combined_df[market_cols].abs() / 
-                                                   (combined_df[market_cols].abs().sum(axis=1) + 1e-8)).max(axis=1)
+            market_abs = combined_df[market_cols].abs()
+            row_sums = market_abs.sum(axis=1) + 1e-8
+            print("market_abs shape:", market_abs.shape)       # Should be (185831, num_markets)
+            print("row_sums shape:", row_sums.shape)
+            combined_df['exposure_concentration'] = market_abs.div(row_sums, axis=0).max(axis=1)
             
             # Number of active positions
             combined_df['active_positions'] = (combined_df[market_cols].abs() > 1e-6).sum(axis=1)
