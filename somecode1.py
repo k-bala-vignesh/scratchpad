@@ -21,16 +21,48 @@ class PnLPredictor:
         self.feature_importance = {}
         self.pca = None
         
-    def load_data(self, train_path=None, test_path=None):
-        """Load training and test data"""
-        if train_path:
-            self.train_df = pd.read_csv(train_path)
-        if test_path:
-            self.test_df = pd.read_csv(test_path)
+    def load_data(self, data=None, train_path=None, test_path=None, test_size=0.2, random_state=42):
+        """Load training and test data from variable or files"""
+        if data is not None:
+            # Split the provided data into train/test
+            print(f"Original data shape: {data.shape}")
             
-        print(f"Training data shape: {self.train_df.shape}")
-        if hasattr(self, 'test_df'):
+            # Stratified split to maintain target distribution
+            # For regression, we can bin the target for stratification
+            target_col = 'pnl'  # Assuming 'pnl' is the target column
+            if target_col in data.columns:
+                # Create bins for stratification
+                data['target_bins'] = pd.qcut(data[target_col], q=5, labels=False, duplicates='drop')
+                
+                from sklearn.model_selection import train_test_split
+                self.train_df, self.test_df = train_test_split(
+                    data, 
+                    test_size=test_size, 
+                    random_state=random_state,
+                    stratify=data['target_bins']
+                )
+                
+                # Remove the temporary binning column
+                self.train_df = self.train_df.drop('target_bins', axis=1)
+                self.test_df = self.test_df.drop('target_bins', axis=1)
+            else:
+                # Simple random split if target column not found
+                self.train_df, self.test_df = train_test_split(
+                    data, 
+                    test_size=test_size, 
+                    random_state=random_state
+                )
+                
+            print(f"Training data shape: {self.train_df.shape}")
             print(f"Test data shape: {self.test_df.shape}")
+            
+        elif train_path:
+            self.train_df = pd.read_csv(train_path)
+            if test_path:
+                self.test_df = pd.read_csv(test_path)
+            print(f"Training data shape: {self.train_df.shape}")
+            if hasattr(self, 'test_df'):
+                print(f"Test data shape: {self.test_df.shape}")
     
     def explore_data(self):
         """Comprehensive data exploration"""
@@ -379,12 +411,12 @@ class PnLPredictor:
         ensemble_pred = np.mean(list(predictions.values()), axis=0)
         return ensemble_pred, predictions
     
-    def run_full_pipeline(self, train_path, test_path=None):
+    def run_full_pipeline(self, data=None, train_path=None, test_path=None, test_size=0.2):
         """Run the complete pipeline"""
         print("=== STARTING PNL PREDICTION PIPELINE ===")
         
         # Load data
-        self.load_data(train_path, test_path)
+        self.load_data(data=data, train_path=train_path, test_path=test_path, test_size=test_size)
         
         # Explore data
         self.explore_data()
@@ -399,37 +431,75 @@ class PnLPredictor:
         # Train ensemble
         self.train_ensemble(train_features, train_target)
         
-        # Make predictions if test data available
-        if test_processed is not None:
+        # Make predictions on test set
+        if hasattr(self, 'test_df'):
             test_features = self.prepare_features(test_processed, fit_scaler=False)
             ensemble_pred, individual_preds = self.predict(test_features)
             
-            # Create submission
-            submission = pd.DataFrame({
-                'scenario_id': test_processed['scenario_id'],
-                'pnl': ensemble_pred
+            # Evaluate on test set (since we have true labels)
+            test_target = test_processed['pnl']
+            test_rmse = np.sqrt(mean_squared_error(test_target, ensemble_pred))
+            print(f"\n=== TEST SET EVALUATION ===")
+            print(f"Test RMSE: {test_rmse:.6f}")
+            
+            # Individual model performance on test set
+            for name, pred in individual_preds.items():
+                model_rmse = np.sqrt(mean_squared_error(test_target, pred))
+                print(f"{name.upper()} Test RMSE: {model_rmse:.6f}")
+            
+            # Create results dataframe
+            results = pd.DataFrame({
+                'actual': test_target,
+                'predicted': ensemble_pred,
+                'residual': test_target - ensemble_pred
             })
             
-            submission.to_csv('submission.csv', index=False)
-            print("Submission saved to 'submission.csv'")
+            # Plot predictions vs actual
+            plt.figure(figsize=(12, 4))
+            plt.subplot(1, 2, 1)
+            plt.scatter(results['actual'], results['predicted'], alpha=0.5)
+            plt.plot([results['actual'].min(), results['actual'].max()], 
+                    [results['actual'].min(), results['actual'].max()], 'r--')
+            plt.xlabel('Actual PnL')
+            plt.ylabel('Predicted PnL')
+            plt.title('Predictions vs Actual')
             
-            return submission
+            plt.subplot(1, 2, 2)
+            plt.hist(results['residual'], bins=50, alpha=0.7)
+            plt.xlabel('Residuals')
+            plt.ylabel('Frequency')
+            plt.title('Residual Distribution')
+            plt.tight_layout()
+            plt.show()
+            
+            return results
         
         return None
 
-# Usage example:
+# Usage example for your scenario:
 """
-# Initialize predictor
+# With your existing data variable (180k rows, 22 columns)
 predictor = PnLPredictor()
 
-# Run full pipeline
-submission = predictor.run_full_pipeline('train.csv', 'test.csv')
+# Option 1: Use 80% for training, 20% for testing
+results = predictor.run_full_pipeline(data=data, test_size=0.2)
 
-# For additional analysis:
-# cv_score, oof_preds = predictor.cross_validate_model(train_features, train_target, 'lgb', n_splits=5)
+# Option 2: Custom split (e.g., 90% train, 10% test)
+results = predictor.run_full_pipeline(data=data, test_size=0.1)
+
+# Option 3: For cross-validation without holdout test set
+predictor.load_data(data=data, test_size=0.0)  # Use all data for training
+predictor.explore_data()
+train_processed, _ = predictor.feature_engineering()
+train_features = predictor.prepare_features(train_processed, fit_scaler=True)
+train_target = train_processed['pnl']
+
+# 5-fold cross-validation
+cv_score, oof_preds = predictor.cross_validate_model(train_features, train_target, 'lgb', n_splits=5)
 """
 
-print("PnL Prediction Pipeline Ready!")
+print("PnL Prediction Pipeline Ready for your data variable!")
 print("Usage:")
 print("1. predictor = PnLPredictor()")
-print("2. submission = predictor.run_full_pipeline('train.csv', 'test.csv')")
+print("2. results = predictor.run_full_pipeline(data=data, test_size=0.2)")
+print("3. This will use 80% for training and 20% for testing with stratified split")
