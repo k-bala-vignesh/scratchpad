@@ -8,6 +8,7 @@ from sklearn.metrics import mean_squared_error
 from sklearn.linear_model import Ridge, Lasso, ElasticNet
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.decomposition import PCA
+from sklearn.decomposition import IncrementalPCA
 import lightgbm as lgb
 import xgboost as xgb
 import optuna
@@ -183,23 +184,30 @@ class PnLPredictor:
                 combined_df[f'{col}_count'] = combined_df[col].map(category_counts).fillna(0)
         
         # 5. PCA features for dimensionality reduction
+        from sklearn.decomposition import IncrementalPCA
+
+        # 5. PCA features for dimensionality reduction
         if len(market_cols) > 10:
-            print("Creating PCA features...")
+            print("Creating PCA features using IncrementalPCA...")
             market_data = combined_df[market_cols].fillna(0)
-            
-            # Standardize before PCA
+
+            # Use only top N most variable columns to reduce memory usage
+            n_top_vars = 50
+            variances = market_data.var().sort_values(ascending=False)
+            top_var_cols = variances.head(n_top_vars).index.tolist()
+    
+            # Standardize
             scaler = StandardScaler()
-            market_scaled = scaler.fit_transform(market_data)
-            
-            # Apply PCA
-            self.pca = PCA(n_components=min(10, len(market_cols)))
+            market_scaled = scaler.fit_transform(market_data[top_var_cols])
+
+            # Use IncrementalPCA to avoid memory blowup
+            self.pca = IncrementalPCA(n_components=10, batch_size=10000)
             pca_features = self.pca.fit_transform(market_scaled)
-            
-            # Add PCA features
+
             for i in range(pca_features.shape[1]):
                 combined_df[f'pca_{i}'] = pca_features[:, i]
-            
-            print(f"PCA explained variance ratio: {self.pca.explained_variance_ratio_[:5]}")
+
+            print(f"PCA explained variance (first 5 components): {self.pca.explained_variance_ratio_[:5]}")
         
         # 6. Interaction features (top correlations with target if available)
         if 'pnl' in combined_df.columns and market_cols:
